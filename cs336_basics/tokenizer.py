@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import os
 from collections import Counter, defaultdict
 from functools import partial
+import sys
 from typing import BinaryIO, Optional
 
 import regex as re
@@ -129,7 +130,7 @@ def train_merges(
                 p_prime = (merge_node.token, after.token)
                 pair_counter[p] -= count
                 pair_to_positions[p].remove(node.next)
-                removed.add(before)
+                removed.add(node.next)
                 merge_node.next = after
                 after.prev = merge_node
                 pair_counter[p_prime] += count
@@ -212,11 +213,7 @@ def find_chunk_boundaries(
     return sorted(set(chunk_boundaries))
 
 
-if __name__ == "__main__":
-    # GPT4_SPECIAL_TOKENS = [
-    #     "<|endoftext|>"
-    # ]
-    # train_bpe("data/TinyStoriesV2-GPT4-valid.txt", 0, GPT4_SPECIAL_TOKENS)
+def simple_test():
     import tempfile
     with tempfile.NamedTemporaryFile("wb") as f:
         dataset = b"<|endoftext|>".join([b"low"] * 5 + [b"lower"] * 2 + [b"widest"] * 3 + [b"newest"] * 6)
@@ -226,3 +223,10 @@ if __name__ == "__main__":
 
     print("\033[2J\033[H", end="")
     print(f"{vocab=}\n\n{merges=}")
+
+
+if __name__ == "__main__":
+    GPT4_SPECIAL_TOKENS = [
+        "<|endoftext|>"
+    ]
+    train_bpe(sys.argv[1], int(sys.argv[2]), GPT4_SPECIAL_TOKENS)
