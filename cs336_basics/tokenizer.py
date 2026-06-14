@@ -8,6 +8,8 @@ from typing import BinaryIO, Optional
 import regex as re
 import multiprocessing
 
+from tqdm import tqdm
+
 PRETOKENIZER_RE = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
 def pretokenizer_split(data: bytes) -> list[bytes]:
@@ -87,7 +89,7 @@ def train_merges(
     vocab += (i.to_bytes() for i in range(0x100))
     merges = []
 
-    while len(vocab) < vocab_size:
+    for _ in tqdm(range(vocab_size - len(vocab))):
         best: tuple[int, Pair] = (0, (b"", b""))
         for pair in pair_counter:
             current = (pair_counter[pair], pair)
@@ -229,4 +231,5 @@ if __name__ == "__main__":
     GPT4_SPECIAL_TOKENS = [
         "<|endoftext|>"
     ]
-    train_bpe(sys.argv[1], int(sys.argv[2]), GPT4_SPECIAL_TOKENS)
+    vocab, merges = train_bpe(sys.argv[1], int(sys.argv[2]), GPT4_SPECIAL_TOKENS)
+    print(f"{len(vocab)=}")
