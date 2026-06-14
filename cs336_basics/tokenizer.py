@@ -1,8 +1,12 @@
+import argparse
 from dataclasses import dataclass
 import os
 from collections import Counter, defaultdict
 from functools import partial
+from pathlib import Path
+import pickle
 import sys
+import time
 from typing import BinaryIO, Optional
 
 import regex as re
@@ -228,8 +232,35 @@ def simple_test():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_path")
+    parser.add_argument("vocab_size", type=int)
+    parser.add_argument("output_dir", type=Path)
+    args = parser.parse_args()
+
     GPT4_SPECIAL_TOKENS = [
         "<|endoftext|>"
     ]
-    vocab, merges = train_bpe(sys.argv[1], int(sys.argv[2]), GPT4_SPECIAL_TOKENS)
-    print(f"{len(vocab)=}")
+
+    output_dir: Path = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+    start_time = time.perf_counter()
+    vocab, merges = train_bpe(args.input_path, args.vocab_size, GPT4_SPECIAL_TOKENS)
+    end_time = time.perf_counter()
+
+    with open(output_dir / "logs.txt", "w") as f:
+        def print_and_write(text: str):
+            print(text)
+            f.write(text)
+
+        duration = end_time - start_time
+        print_and_write(f"Training on {args.input_path}")
+        print_and_write(f"vocab_size = {args.vocab_size}")
+        print_and_write(f"{duration=}")
+        print_and_write(f"{len(vocab)=}")
+
+    with open(output_dir / "vocab.pkl", "wb") as f:
+        pickle.dump(vocab, f)
+
+    with open(output_dir / "merges.pkl", "wb") as f:
+        pickle.dump(merges, f)
