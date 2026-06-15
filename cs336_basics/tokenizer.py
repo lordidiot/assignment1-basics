@@ -60,6 +60,7 @@ class Node:
     count: int
     prev: Optional["Node"] = None
     next: Optional["Node"] = None
+    tombstone: bool = False
 
 
 Pair = tuple[bytes, bytes]
@@ -111,6 +112,8 @@ def train_merges(
 
         removed: set[Node] = set() # To handle cases like "aaa"
         for node in list(pair_to_positions[merge_pair]):
+            if node.tombstone:
+                continue # skip
             if node in removed:
                 continue # skip
 
@@ -123,7 +126,7 @@ def train_merges(
                 p = (before.token, node.token)
                 p_prime = (before.token, merge_node.token)
                 pair_counter[p] -= count
-                pair_to_positions[p].remove(before)
+                before.tombstone = True
                 removed.add(before)
                 before.next = merge_node
                 merge_node.prev = before
@@ -135,7 +138,7 @@ def train_merges(
                 p = (node.next.token, after.token)
                 p_prime = (merge_node.token, after.token)
                 pair_counter[p] -= count
-                pair_to_positions[p].remove(node.next)
+                node.next.tombstone = True
                 removed.add(node.next)
                 merge_node.next = after
                 after.prev = merge_node
@@ -251,7 +254,7 @@ if __name__ == "__main__":
     with open(output_dir / "logs.txt", "w") as f:
         def print_and_write(text: str):
             print(text)
-            f.write(text)
+            f.write(text + '\n')
 
         duration = end_time - start_time
         print_and_write(f"Training on {args.input_path}")
