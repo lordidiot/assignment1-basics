@@ -1,0 +1,4 @@
+Training on ./data/TinyStoriesV2-GPT4-train.txt
+vocab_size = 10000
+duration=136.19806126100002
+len(vocab)=10000
