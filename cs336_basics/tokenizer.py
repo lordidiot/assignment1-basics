@@ -5,7 +5,6 @@ from collections import Counter, defaultdict
 from functools import partial
 from pathlib import Path
 import pickle
-import sys
 import time
 from typing import BinaryIO, Optional
 
@@ -23,7 +22,8 @@ def pretokenizer_split(data: bytes) -> list[bytes]:
 def train_bpe(
     input_path: str,
     vocab_size: int,
-    special_tokens: list[str]
+    special_tokens: list[str],
+    output_dir: Path | None = None
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
     Args:
@@ -39,31 +39,44 @@ def train_bpe(
         merges (list[tuple[bytes, bytes]]): BPE merges in order of creation.
             Each item is (<token1>, <token2>) indicating a merge.
     """
-    num_processes = os.cpu_count()
-    special_tokens_re = re.compile(b"|".join(re.escape(special.encode("utf-8")) for special in special_tokens))
-    with open(input_path, "rb") as input_file:
-        chunk_boundaries = find_chunk_boundaries(input_file, num_processes, special_tokens_re)
-        boundaries = list(zip(chunk_boundaries, chunk_boundaries[1:]))
+    pretoken_counter_pkl = output_dir / "pretoken_counter.pkl" if output_dir else None
+    if (
+        pretoken_counter_pkl is not None
+        and pretoken_counter_pkl.exists()
+    ):
+        # load
+        with open(pretoken_counter_pkl, "rb") as f:
+            pretoken_counter = pickle.load(f)
+    else:
+        num_processes = os.cpu_count()
+        special_tokens_re = re.compile(b"|".join(re.escape(special.encode("utf-8")) for special in special_tokens))
+        with open(input_path, "rb") as input_file:
+            chunk_boundaries = find_chunk_boundaries(input_file, num_processes, special_tokens_re)
+            boundaries = list(zip(chunk_boundaries, chunk_boundaries[1:]))
 
-    pretokenize_and_get_counts_partial = partial(pretokenize_and_get_counts, input_path, special_tokens_re)
-    with multiprocessing.Pool(processes=os.cpu_count()) as pool:
-        counters = pool.map(pretokenize_and_get_counts_partial, boundaries)
-    pretoken_counter = sum(counters, start=Counter())
-    del pretoken_counter[b""] # Delete empty pretokens
+        pretokenize_and_get_counts_partial = partial(pretokenize_and_get_counts, input_path, special_tokens_re)
+        with multiprocessing.Pool(processes=os.cpu_count()) as pool:
+            counters = pool.map(pretokenize_and_get_counts_partial, boundaries)
+        pretoken_counter = sum(counters, start=Counter())
+        del pretoken_counter[b""] # Delete empty pretokens
+
+        # save
+        if pretoken_counter_pkl is not None:
+            with open(pretoken_counter_pkl, "wb") as f:
+                pickle.dump(pretoken_counter, f)
 
     return train_merges(pretoken_counter, vocab_size, special_tokens)
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, slots=True)
 class Node:
-    token: bytes
-    count: int
+    token_id: int
+    count_or_id: int
     prev: Optional["Node"] = None
     next: Optional["Node"] = None
-    tombstone: bool = False
 
 
-Pair = tuple[bytes, bytes]
+Pair = tuple[int, int]
 
 
 def train_merges(
@@ -74,60 +87,64 @@ def train_merges(
     pair_counter: Counter[Pair] = Counter()
     pair_to_positions: defaultdict[Pair, list[Node]] = defaultdict(list)
 
+    token_id_to_bytes = list(i.encode("utf-8") for i in special_tokens)
+    token_id_to_bytes += (i.to_bytes() for i in range(0x100))
+    bytes_to_token_id = {b:i for i,b in enumerate(token_id_to_bytes)}
+    merges: list[tuple[bytes, bytes]] = []
+
     for pretoken in pretoken_counter:
-        # print(f"\n================== {pretoken=}")
         count = pretoken_counter[pretoken]
-        prev_node = Node(pretoken[0:1], count)
+        prev_node = Node(bytes_to_token_id[pretoken[0:1]], count)
         for i in range(1, len(pretoken)):
-            pair = (prev_node.token, pretoken[i:i+1])
+            pair = (prev_node.token_id, bytes_to_token_id[pretoken[i:i+1]])
 
             node = Node(pair[1], count, prev=prev_node)
             prev_node.next = node
 
-            # print(f"{pair=} {count=}")
             pair_counter[pair] += count
             pair_to_positions[pair].append(prev_node)
 
             prev_node = node
     
-    vocab = list(i.encode("utf-8") for i in special_tokens)
-    vocab += (i.to_bytes() for i in range(0x100))
-    merges = []
-
-    for _ in tqdm(range(vocab_size - len(vocab))):
-        best: tuple[int, Pair] = (0, (b"", b""))
+    for _ in tqdm(range(vocab_size - len(bytes_to_token_id))):
+        # Invariant: needs to be tuple[int, tuple[bytes, bytes]]
+        # so that we handle the tiebreaking logic for equal counts
+        best: tuple[int, tuple[bytes, bytes]] = (0, (b"", b""))
         for pair in pair_counter:
-            current = (pair_counter[pair], pair)
+            current = (pair_counter[pair], (token_id_to_bytes[pair[0]], token_id_to_bytes[pair[1]]))
             if current > best:
                 best = current
         
-        # print(f"{best=}")
-        merge_pair_count, merge_pair = best
+        merge_pair_count, merge_pair_bytes = best
+        merge_pair: tuple[int, int] = tuple(bytes_to_token_id[i] for i in merge_pair_bytes)
         if not merge_pair_count:
             break
 
-        merged = merge_pair[0] + merge_pair[1]
-        merges.append(merge_pair)
-        vocab.append(merged)
+        merged_bytes = merge_pair_bytes[0] + merge_pair_bytes[1]
+        merges.append(merge_pair_bytes)
+        if merged_bytes not in bytes_to_token_id:
+            token_id_to_bytes.append(merged_bytes)
+            bytes_to_token_id[merged_bytes] = len(bytes_to_token_id)
+        merged_token_id = bytes_to_token_id[merged_bytes]
 
-        removed: set[Node] = set() # To handle cases like "aaa"
+        # Need to copy because we mutate pair_to_positions
         for node in list(pair_to_positions[merge_pair]):
-            if node.tombstone:
-                continue # skip
-            if node in removed:
-                continue # skip
+            if (
+                node.token_id != merge_pair[0]
+                or node.next is None
+                or node.next.token_id != merge_pair[1]
+            ):
+                continue # dead node
 
-            merge_node = Node(merged, node.count)
-            count = node.count
+            merge_node = Node(merged_token_id, node.count_or_id)
+            count = node.count_or_id
 
             # before -X-> node(pair0) -> pair1 -Y-> after
             # unlink X
             if (before := node.prev) is not None:
-                p = (before.token, node.token)
-                p_prime = (before.token, merge_node.token)
+                p = (before.token_id, node.token_id)
+                p_prime = (before.token_id, merge_node.token_id)
                 pair_counter[p] -= count
-                before.tombstone = True
-                removed.add(before)
                 before.next = merge_node
                 merge_node.prev = before
                 pair_counter[p_prime] += count
@@ -135,21 +152,23 @@ def train_merges(
             
             # unlink Y
             if (after := node.next.next) is not None:
-                p = (node.next.token, after.token)
-                p_prime = (merge_node.token, after.token)
+                p = (node.next.token_id, after.token_id)
+                p_prime = (merge_node.token_id, after.token_id)
                 pair_counter[p] -= count
-                node.next.tombstone = True
-                removed.add(node.next)
                 merge_node.next = after
                 after.prev = merge_node
                 pair_counter[p_prime] += count
                 pair_to_positions[p_prime].append(merge_node)
+            
+            node.next.next = None
+            node.next.prev = None
+            node.next = None
+            node.prev = None
 
         del pair_counter[merge_pair]
         del pair_to_positions[merge_pair]
 
-    return {k:v for k,v in enumerate(vocab)}, merges
-
+    return {i:b for b,i in bytes_to_token_id.items()}, merges
 
 
 def pretokenize_and_get_counts(
@@ -248,7 +267,7 @@ if __name__ == "__main__":
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     start_time = time.perf_counter()
-    vocab, merges = train_bpe(args.input_path, args.vocab_size, GPT4_SPECIAL_TOKENS)
+    vocab, merges = train_bpe(args.input_path, args.vocab_size, GPT4_SPECIAL_TOKENS, output_dir)
     end_time = time.perf_counter()
 
     with open(output_dir / "logs.txt", "w") as f:

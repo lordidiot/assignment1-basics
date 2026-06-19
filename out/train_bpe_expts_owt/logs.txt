@@ -1,4 +1,4 @@
 Training on ./data/owt_train.txt
 vocab_size = 32000
-duration=12409.250265142997
+duration=34102.07148732798
 len(vocab)=32000
