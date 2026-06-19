@@ -1,12 +1,13 @@
 import argparse
 from dataclasses import dataclass
+import heapq
 import os
 from collections import Counter, defaultdict
 from functools import partial
 from pathlib import Path
 import pickle
 import time
-from typing import BinaryIO, Optional
+from typing import BinaryIO, Iterable, Iterator, Optional, Self
 
 import regex as re
 import multiprocessing
@@ -17,6 +18,9 @@ PRETOKENIZER_RE = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p
 
 def pretokenizer_split(data: bytes) -> list[bytes]:
     return list(map(lambda s: s.encode("utf-8"), PRETOKENIZER_RE.findall(data.decode("utf-8"))))
+
+def pretokenizer_split_str(text: str) -> list[bytes]:
+    return list(map(lambda s: s.encode("utf-8"), PRETOKENIZER_RE.findall(text)))
 
 
 def train_bpe(
@@ -71,12 +75,136 @@ def train_bpe(
 @dataclass(eq=False, slots=True)
 class Node:
     token_id: int
-    count_or_id: int
+    count: int
     prev: Optional["Node"] = None
     next: Optional["Node"] = None
 
 
 Pair = tuple[int, int]
+
+
+class Tokenizer:
+    def __init__(
+        self,
+        vocab: dict[int, bytes],
+        merges: list[tuple[bytes, bytes]],
+        special_tokens: list[str] | None = None
+    ):
+        self._token_id_to_bytes = vocab
+        self._bytes_to_token_id = {b:i for i,b in vocab.items()}
+
+        self._merge_to_priority_and_id: dict[Pair, tuple[int, int]] = {}
+        for priority, merge in enumerate(merges):
+            pair = (self._bytes_to_token_id[merge[0]], self._bytes_to_token_id[merge[1]])
+            new_token_id = self._bytes_to_token_id[merge[0] + merge[1]]
+            self._merge_to_priority_and_id[pair] = (priority, new_token_id)
+
+        if special_tokens:
+            special_tokens = sorted(special_tokens, key=lambda t: len(t), reverse=True)
+            self._special_tokens_re = re.compile(
+                "(" + "|".join(re.escape(special) for special in special_tokens) + ")"
+            )
+        else:
+            # Never matches, used so re.split() doesn't split anything
+            self._special_tokens_re = re.compile(r"\A(?!)")
+
+    @classmethod
+    def from_files(
+        cls,
+        vocab_filepath: str,
+        merges_filepath: str,
+        special_tokens: list[str] | None = None
+    ) -> Self:
+        with (
+            open(vocab_filepath, "rb") as vocab_file,
+            open(merges_filepath, "rb") as merges_file
+        ):
+            vocab = pickle.load(vocab_file)
+            merges = pickle.load(merges_file)
+            return cls(vocab, merges, special_tokens)
+
+    def encode(self, text: str) -> list[int]:
+        return list(self.encode_iterable([text]))
+
+    def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
+        for text in iterable:
+            for i, pretoken_group in enumerate(self._special_tokens_re.splititer(text)):
+                if pretoken_group == "":
+                    continue
+
+                if i % 2: # special token
+                    yield self._bytes_to_token_id[pretoken_group.encode()]
+                else:
+                    for pretoken in pretokenizer_split_str(pretoken_group):
+                        for token_id in self._encode_pretoken(pretoken):
+                            yield token_id
+
+    def decode(self, ids: list[int]) -> str:
+        """
+        > In the case that the input token IDs do not produce a valid Unicode
+        > string, you should replace the malformed bytes with the official Unicode
+        > replacement character U+FFFD.3 The errors argument of bytes.decode controls
+        > how Unicode decoding errors are handled, and using errors='replace' will
+        > automatically replace malformed data with the replacement marker.
+        """
+        return b"".join(self._token_id_to_bytes[i] for i in ids).decode("utf-8", errors="replace")
+
+    def _encode_pretoken(self, pretoken: bytes) -> list[int]:
+        # tuple ordered to prioritise (merge ordering) followed by (position)
+        # (merge_priority, position, node, pair)
+        pq: list[tuple[int, int, Node, Pair]] = []
+        head = Node(-1, 0) # we abuse count for tombstoning (0 = dead, 1 = live)
+        prev = head
+        for i in range(len(pretoken)):
+            node = Node(self._bytes_to_token_id[pretoken[i:i+1]], 1, prev=prev)
+            prev.next = node
+            if prev != head:
+                pair = (prev.token_id, node.token_id)
+                if pair in self._merge_to_priority_and_id:
+                    pq.append((self._merge_to_priority_and_id[pair][0], i, prev, pair))
+            prev = node
+        tail = Node(-1, 0)
+        prev.next = tail
+
+        heapq.heapify(pq)
+        while pq:
+            _merge_priority, position, a, (a_id, b_id) = heapq.heappop(pq)
+            b = a.next
+            if (
+                not a.count
+                or not b.count
+                or a.token_id != a_id # I _think_ this should never happen
+                or b.token_id != b_id
+            ):
+                continue
+
+            merged_token_id = self._merge_to_priority_and_id[(a.token_id, b.token_id)][1]
+            merged_node = Node(merged_token_id, 1, prev=a.prev, next=b.next)
+            # unlink
+            a.prev.next = merged_node
+            b.next.prev = merged_node
+            # overload count as tombstone (0=dead)
+            a.count = 0
+            b.count = 0
+            a.next = None
+            a.prev = None
+            b.next = None
+            b.prev = None
+
+            # Invariant: head & tail will always be token_id=-1,
+            # and I assume that this will never appear in merges
+            if (pair := (merged_node.prev.token_id, merged_node.token_id)) in self._merge_to_priority_and_id:
+                heapq.heappush(pq, (self._merge_to_priority_and_id[pair][0], position-1, merged_node.prev, pair))
+
+            if (pair := (merged_node.token_id, merged_node.next.token_id)) in self._merge_to_priority_and_id:
+                heapq.heappush(pq, (self._merge_to_priority_and_id[pair][0], position, merged_node, pair))
+
+        token_ids = []
+        node = head.next
+        while node != tail:
+            token_ids.append(node.token_id)
+            node = node.next
+        return token_ids
 
 
 def train_merges(
@@ -136,8 +264,8 @@ def train_merges(
             ):
                 continue # dead node
 
-            merge_node = Node(merged_token_id, node.count_or_id)
-            count = node.count_or_id
+            merge_node = Node(merged_token_id, node.count)
+            count = node.count
 
             # before -X-> node(pair0) -> pair1 -Y-> after
             # unlink X
