@@ -92,13 +92,6 @@ class Tokenizer:
     ):
         self._token_id_to_bytes = vocab
         self._bytes_to_token_id = {b:i for i,b in vocab.items()}
-
-        self._merge_to_priority_and_id: dict[Pair, tuple[int, int]] = {}
-        for priority, merge in enumerate(merges):
-            pair = (self._bytes_to_token_id[merge[0]], self._bytes_to_token_id[merge[1]])
-            new_token_id = self._bytes_to_token_id[merge[0] + merge[1]]
-            self._merge_to_priority_and_id[pair] = (priority, new_token_id)
-
         if special_tokens:
             special_tokens = sorted(special_tokens, key=lambda t: len(t), reverse=True)
             self._special_tokens_re = re.compile(
@@ -150,60 +143,81 @@ class Tokenizer:
         return b"".join(self._token_id_to_bytes[i] for i in ids).decode("utf-8", errors="replace")
 
     def _encode_pretoken(self, pretoken: bytes) -> list[int]:
-        # tuple ordered to prioritise (merge ordering) followed by (position)
-        # (merge_priority, position, node, pair)
-        pq: list[tuple[int, int, Node, Pair]] = []
-        head = Node(-1, 0) # we abuse count for tombstoning (0 = dead, 1 = live)
-        prev = head
-        for i in range(len(pretoken)):
-            node = Node(self._bytes_to_token_id[pretoken[i:i+1]], 1, prev=prev)
-            prev.next = node
-            if prev != head:
-                pair = (prev.token_id, node.token_id)
-                if pair in self._merge_to_priority_and_id:
-                    pq.append((self._merge_to_priority_and_id[pair][0], i, prev, pair))
-            prev = node
-        tail = Node(-1, 0)
-        prev.next = tail
+        if pretoken in self._bytes_to_token_id:
+            return [self._bytes_to_token_id[pretoken]]
+
+        # Invariant: Lower token_id = higher priority merge
+        n = len(pretoken)
+        prevs = [None] * n
+        ends = [None] * n
+        ranks = [None] * n
+        # If a merge happens with the token starting at i
+        # and the token after, what would be the resultant id / rank
+        next_ranks = [None] * n
+        # (rank, start_pos)
+        pq = []
+
+        prevs[0] = -1
+        ends[0] = 1
+        ranks[0] = self._bytes_to_token_id[pretoken[0:1]]
+
+        for i in range(1, n):
+            prevs[i] = i-1
+            ends[i] = i+1
+            ranks[i] = self._bytes_to_token_id[pretoken[i:i+1]]
+
+            if pretoken[i-1:i+1] in self._bytes_to_token_id:
+                next_rank = self._bytes_to_token_id[pretoken[i-1:i+1]]
+                next_ranks[i-1] = next_rank
+                pq.append((next_rank, i-1))
 
         heapq.heapify(pq)
         while pq:
-            _merge_priority, position, a, (a_id, b_id) = heapq.heappop(pq)
-            b = a.next
-            if (
-                not a.count
-                or not b.count
-                or a.token_id != a_id # I _think_ this should never happen
-                or b.token_id != b_id
-            ):
+            # [prev?] [left] [right] [next?]
+            rank, left = heapq.heappop(pq)
+            if next_ranks[left] != rank:
                 continue
 
-            merged_token_id = self._merge_to_priority_and_id[(a.token_id, b.token_id)][1]
-            merged_node = Node(merged_token_id, 1, prev=a.prev, next=b.next)
-            # unlink
-            a.prev.next = merged_node
-            b.next.prev = merged_node
-            # overload count as tombstone (0=dead)
-            a.count = 0
-            b.count = 0
-            a.next = None
-            a.prev = None
-            b.next = None
-            b.prev = None
+            right = ends[left]
+            prev = prevs[left]
+            next = ends[right]
 
-            # Invariant: head & tail will always be token_id=-1,
-            # and I assume that this will never appear in merges
-            if (pair := (merged_node.prev.token_id, merged_node.token_id)) in self._merge_to_priority_and_id:
-                heapq.heappush(pq, (self._merge_to_priority_and_id[pair][0], position-1, merged_node.prev, pair))
+            # Update left
+            ends[left] = ends[right]
+            ranks[left] = rank
+            ranks[right] = None # Not needed, but easier to debug
+            next_ranks[right] = None # invalidate right
 
-            if (pair := (merged_node.token_id, merged_node.next.token_id)) in self._merge_to_priority_and_id:
-                heapq.heappush(pq, (self._merge_to_priority_and_id[pair][0], position, merged_node, pair))
+            # Check new merges
+            if prev >= 0:
+                if (merged := pretoken[prev:next]) in self._bytes_to_token_id:
+                    rank = self._bytes_to_token_id[merged]
+                    next_ranks[prev] = rank
+                    heapq.heappush(pq, (rank, prev))
+                else:
+                    next_ranks[prev] = None # invalidate merge
+
+            if next < n:
+                prevs[next] = left
+                if (merged := pretoken[left:ends[next]]) in self._bytes_to_token_id:
+                    rank = self._bytes_to_token_id[merged]
+                    next_ranks[left] = rank
+                    heapq.heappush(pq, (rank, left))
+                else:
+                    next_ranks[left] = None
+            else:
+                next_ranks[left] = None # invalidate merge
+
 
         token_ids = []
-        node = head.next
-        while node != tail:
-            token_ids.append(node.token_id)
-            node = node.next
+        i = 0
+        while i < n:
+            next_i = ends[i]
+            token_bytes = pretoken[i:next_i]
+            token_id = self._bytes_to_token_id[token_bytes]
+            token_ids.append(token_id)
+            i = next_i
+
         return token_ids
 
 
