@@ -177,7 +177,8 @@ def scaled_dot_product_attention(
     d_k = q_BsLqK.shape[-1]
     qk_BsLqLk = einsum(q_BsLqK, k_BsLkK, "... Lq K, ... Lk K -> ... Lq Lk")
     if attention_mask_LqLk is not None:
-        qk_BsLqLk[~attention_mask_LqLk] = -torch.inf
+        # https://docs.pytorch.org/docs/2.12/generated/torch.Tensor.masked_fill_.html
+        qk_BsLqLk = qk_BsLqLk.masked_fill(~attention_mask_LqLk, -torch.inf)
     attention_weight_BsLqLk = softmax(qk_BsLqLk / math.sqrt(d_k), -1)
     out_BsLqV = einsum(attention_weight_BsLqLk, v_BsLkV, "... Lq Lk, ... Lk V -> ... Lq V")
     return out_BsLqV
@@ -196,14 +197,131 @@ class MultiheadSelfAttention(nn.Module):
         self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.o = Linear(d_model, d_model, device=device, dtype=dtype)
-    
+        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+
     def forward(self, x_BsLH: torch.Tensor) -> torch.Tensor:
         """
         Bs: 0 or more batch dimensions
         L: seq_len
         H: hidden_dim
-        D: head dim
+        D: heads
+        E: head feature dim
         """
-        q_BsLH
-        pass
+        seq_len = x_BsLH.shape[-2]
+        q_BsLH = self.q_proj(x_BsLH)
+        k_BsLH = self.k_proj(x_BsLH)
+        v_BsLH = self.v_proj(x_BsLH)
+        q_BsDLE = rearrange(q_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+        k_BsDLE = rearrange(k_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+        v_BsDLE = rearrange(v_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        mixed_BsDLE = scaled_dot_product_attention(q_BsDLE, k_BsDLE, v_BsDLE, attention_mask_LL)
+        mixed_BsLH = rearrange(mixed_BsDLE, "... D L E -> ... L (D E)")
+        out_BsLH = self.o_proj(mixed_BsLH)
+        return out_BsLH
+
+
+class MultiheadSelfAttentionRoPE(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.num_heads = num_heads
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.rope = RoPE(theta, d_model // num_heads, max_seq_len, device=device)
+
+    def forward(self, x_BsLH: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        Bs: 0 or more batch dimensions
+        L: seq_len
+        H: hidden_dim
+        D: heads
+        E: head feature dim
+        """
+        seq_len = x_BsLH.shape[-2]
+        q_BsLH = self.q_proj(x_BsLH)
+        k_BsLH = self.k_proj(x_BsLH)
+        v_BsLH = self.v_proj(x_BsLH)
+
+        q_BsDLE = rearrange(q_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+        k_BsDLE = rearrange(k_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+        v_BsDLE = rearrange(v_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
+
+        # rope (only q and k, NOT v)
+        q_BsDLE = self.rope(q_BsDLE, token_positions)
+        k_BsDLE = self.rope(k_BsDLE, token_positions)
+
+        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        mixed_BsDLE = scaled_dot_product_attention(q_BsDLE, k_BsDLE, v_BsDLE, attention_mask_LL)
+        mixed_BsLH = rearrange(mixed_BsDLE, "... D L E -> ... L (D E)")
+        out_BsLH = self.o_proj(mixed_BsLH)
+        return out_BsLH
+
+
+class TransformerBlock(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.attention = MultiheadSelfAttentionRoPE(d_model, num_heads, max_seq_len, theta, device=device, dtype=dtype)
+        self.ff = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
+        self.rmsnorm1 = RMSNorm(d_model, device=device, dtype=dtype)
+        self.rmsnorm2 = RMSNorm(d_model, device=device, dtype=dtype)
+
+    def forward(self, x_BsLH: torch.Tensor) -> torch.Tensor:
+        """
+        Bs: 0 or more batch dimensions
+        L: seq_len
+        H: hidden_dim
+        """
+        seq_len = x_BsLH.shape[-2]
+        token_positions = torch.arange(seq_len)
+        x_BsLH = x_BsLH + self.attention(self.rmsnorm1(x_BsLH), token_positions)
+        x_BsLH = x_BsLH + self.ff(self.rmsnorm2(x_BsLH))
+        return x_BsLH
+
+
+class TransformerLM(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        num_layers: int,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None
+    ):
+        super().__init__()
+        self.token_embeddings = Embedding(vocab_size, d_model, device=device, dtype=dtype)
+        self.layers = nn.Sequential(*[
+            TransformerBlock(d_model, num_heads, d_ff, context_length, theta, device=device, dtype=dtype)
+            for _ in range(num_layers)
+        ])
+        self.rmsnorm = RMSNorm(d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+
+    def forward(self, x_BsL: torch.Tensor) -> torch.Tensor:
+        x_BsLH = self.token_embeddings(x_BsL)
+        x_BsLH = self.layers(x_BsLH)
+        x_BsLH = self.rmsnorm(x_BsLH)
+        logits_BsLV = self.lm_head(x_BsLH)
+        return logits_BsLV

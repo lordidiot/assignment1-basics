@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.tokenizer import Tokenizer, train_bpe
-from cs336_basics.transformer import Embedding, Linear, RMSNorm, RoPE, SwiGLU, scaled_dot_product_attention, softmax
+from cs336_basics.transformer import Embedding, Linear, MultiheadSelfAttention, MultiheadSelfAttentionRoPE, RMSNorm, RoPE, SwiGLU, TransformerBlock, TransformerLM, scaled_dot_product_attention, softmax
 
 
 def run_linear(
@@ -149,7 +149,14 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    m = MultiheadSelfAttention(d_model, num_heads)
+    m.load_state_dict({
+        "q_proj.w_OI": q_proj_weight,
+        "k_proj.w_OI": k_proj_weight,
+        "v_proj.w_OI": v_proj_weight,
+        "o_proj.w_OI": o_proj_weight,
+    })
+    return m(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -189,7 +196,14 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_model"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    m = MultiheadSelfAttentionRoPE(d_model, num_heads, max_seq_len, theta)
+    m.load_state_dict({
+        "q_proj.w_OI": q_proj_weight,
+        "k_proj.w_OI": k_proj_weight,
+        "v_proj.w_OI": v_proj_weight,
+        "o_proj.w_OI": o_proj_weight,
+    })
+    return m(in_features, token_positions)
 
 
 def run_rope(
@@ -285,7 +299,21 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    transformer_block = TransformerBlock(
+        d_model, num_heads, d_ff, max_seq_len, theta
+    )
+    transformer_block.load_state_dict({
+        'attention.q_proj.w_OI': weights['attn.q_proj.weight'],
+        'attention.k_proj.w_OI': weights['attn.k_proj.weight'],
+        'attention.v_proj.w_OI': weights['attn.v_proj.weight'],
+        'attention.o_proj.w_OI': weights['attn.output_proj.weight'],
+        'ff.linear1.w_OI': weights['ffn.w1.weight'],
+        'ff.linear2.w_OI': weights['ffn.w2.weight'],
+        'ff.linear3.w_OI': weights['ffn.w3.weight'],
+        'rmsnorm1.g_H': weights['ln1.weight'],
+        'rmsnorm2.g_H': weights['ln2.weight']
+    })
+    return transformer_block(in_features)
 
 
 def run_transformer_lm(
@@ -367,7 +395,31 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    def transform_dict_key(key: str) -> str:
+        mapping = {
+            "token_embeddings.weight": "token_embeddings.embeddings_EH",
+            "attn.q_proj.weight": "attention.q_proj.w_OI",
+            "attn.k_proj.weight": "attention.k_proj.w_OI",
+            "attn.v_proj.weight": "attention.v_proj.w_OI",
+            "attn.output_proj.weight": "attention.o_proj.w_OI",
+            "ln1.weight": "rmsnorm1.g_H",
+            "ln2.weight": "rmsnorm2.g_H",
+            "ffn.w1.weight": "ff.linear1.w_OI",
+            "ffn.w2.weight": "ff.linear2.w_OI",
+            "ffn.w3.weight": "ff.linear3.w_OI",
+            "ln_final.weight": "rmsnorm.g_H",
+            "lm_head.weight": "lm_head.w_OI",
+        }
+        for old in mapping:
+            key = key.replace(old, mapping[old])
+        return key
+
+    transformer = TransformerLM(vocab_size, context_length, num_layers, d_model, num_heads, d_ff, rope_theta)
+    transformer.load_state_dict({
+        transform_dict_key(k):v
+        for k,v in weights.items()
+    })
+    return transformer(in_indices)
 
 
 def run_rmsnorm(
