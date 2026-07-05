@@ -1,4 +1,5 @@
 import math
+from typing import Any, Callable, Optional
 
 from einops import einsum, rearrange, reduce
 import torch
@@ -152,7 +153,6 @@ class RoPE(nn.Module):
 
 
 def softmax(x: torch.Tensor, i: int) -> torch.Tensor:
-    # logsumexp trick
     c = x.max(i, keepdim=True)[0]
     x_small = x - c
 
@@ -325,3 +325,80 @@ class TransformerLM(nn.Module):
         x_BsLH = self.rmsnorm(x_BsLH)
         logits_BsLV = self.lm_head(x_BsLH)
         return logits_BsLV
+
+
+def has_nan(x: torch.Tensor) -> bool:
+    return torch.any(x != x)
+
+
+def cross_entropy_loss(logits_BsV: torch.Tensor, targets_Bs: torch.Tensor) -> torch.Tensor:
+    """
+    Bs: 0 or more batch dimensions
+    E: vocab_size / number of embeddings
+    """
+    correct_Bs = logits_BsV.gather(-1, targets_Bs.unsqueeze(-1)).squeeze(-1)
+    max_logit_BsV = reduce(logits_BsV, "... V -> ... 1", "max")
+    exp_BsV = torch.exp(logits_BsV - max_logit_BsV)
+    sum_logit_Bs = reduce(exp_BsV, "... V -> ...", "sum")
+    out_Bs = - correct_Bs + max_logit_BsV.unsqueeze(-1) + torch.log(sum_logit_Bs)
+    out_ = reduce(out_Bs, "... -> ", "mean")
+    return out_
+
+
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-3,
+        weight_decay: float = 0.01,
+        betas: tuple[float, float] = (0.9, 0.999),
+        eps: float = 1e-8,
+    ):
+        defaults = {
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "betas": betas,
+            "eps": eps,
+        }
+        super().__init__(params, defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = None if closure is None else closure()
+        for group in self.param_groups:
+            lr, weight_decay, betas, eps = group["lr"], group["weight_decay"], group["betas"], group["eps"]
+            for p in group["params"]:
+                if p.grad is None:
+                    continue
+
+                state: dict[str, Any] = self.state[p]
+                t = state.get("t", 1)
+                m = state["m"] if "m" in state else torch.zeros_like(p)
+                v = state["v"] if "v" in state else torch.zeros_like(p)
+                lr_t = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
+
+                p.data -= lr * weight_decay * p.data
+                m = betas[0] * m + (1 - betas[0]) * p.grad
+                v = betas[1] * v + (1 - betas[1]) * (p.grad ** 2)
+                p.data -= lr_t * m / (torch.sqrt(v) + eps)
+
+                state["t"] = t + 1
+                state["m"] = m
+                state["v"] = v
+        return loss
+
+
+def get_lr_cosine_schedule(t: float, a_max: float, a_min: float, t_w: int, t_c: int) -> float:
+    if t < t_w:
+        return t / t_w * a_max
+    elif t <= t_c:
+        return a_min + 0.5 * (1 + math.cos((t-t_w) / (t_c-t_w) * math.pi)) * (a_max - a_min)
+    else: # t > t_c
+        return a_min
+
+
+def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-6):
+    for parameter in parameters:
+        norm = torch.linalg.vector_norm(parameter.gradient)
+        if norm > m:
+            parameter.gradient.div_(m / (norm + eps))
