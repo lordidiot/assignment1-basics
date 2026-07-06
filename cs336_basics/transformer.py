@@ -1,7 +1,11 @@
+from contextlib import nullcontext
 import math
+import os
 from typing import Any, Callable, Optional
+import typing
 
 from einops import einsum, rearrange, reduce
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -345,7 +349,6 @@ def cross_entropy_loss(logits_BsV: torch.Tensor, targets_Bs: torch.Tensor) -> to
     return out_
 
 
-
 class AdamW(torch.optim.Optimizer):
     def __init__(
         self,
@@ -398,7 +401,61 @@ def get_lr_cosine_schedule(t: float, a_max: float, a_min: float, t_w: int, t_c: 
 
 
 def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-6):
-    for parameter in parameters:
-        norm = torch.linalg.vector_norm(parameter.gradient)
-        if norm > m:
-            parameter.gradient.div_(m / (norm + eps))
+    trainable = [p for p in parameters if p.grad is not None]
+
+    square_sum = 0
+    for p in trainable:
+        square_sum += reduce(p.grad ** 2, "... -> ", "sum")
+    norm = torch.sqrt(square_sum)
+
+    if norm > m:
+        for p in trainable:
+            p.grad.mul_(m / (norm + eps))
+
+
+def get_batch(x: np.ndarray, batch_size: int, context_length: int, device: str):
+    if len(x) < context_length + 1:
+        raise ValueError(f"Sequence too short ({len(x)=}) for {context_length=}")
+    idxs = np.random.randint(0, len(x)-context_length, (batch_size,1))
+    idxs = idxs + np.arange(context_length)
+    tensor_x = torch.LongTensor(x[idxs], device=device)
+    tensor_y = torch.LongTensor(x[idxs+1], device=device)
+    return tensor_x, tensor_y
+
+
+def save_checkpoint(
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    iteration: int,
+    out: str | os.PathLike | typing.BinaryIO | typing.IO[bytes]
+):
+    if isinstance(out, (str, os.PathLike)):
+        ctx_mgr = open(out, "wb")
+    else:
+        ctx_mgr = nullcontext(out)
+    
+    with ctx_mgr as out_f:
+        checkpoint = {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "iteration": iteration 
+        }
+        torch.save(checkpoint, out_f)
+
+
+def load_checkpoint(
+    src: str | os.PathLike | typing.BinaryIO | typing.IO[bytes],
+    model: nn.Module,
+    optimizer: torch.optim.Optimizer
+):
+    if isinstance(src, (str, os.PathLike)):
+        ctx_mgr = open(src, "rb")
+    else:
+        ctx_mgr = nullcontext(src)
+    
+    with ctx_mgr as src_f:
+        checkpoint = torch.load(src_f)
+        model.load_state_dict(checkpoint['model'])
+        optimizer.load_state_dict(checkpoint['optimizer'])
+
+    return checkpoint['iteration']
