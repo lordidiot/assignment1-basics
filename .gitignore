@@ -166,3 +166,5 @@ cython_debug/
 
 /out/*/pretoken_counter.pkl
 /out/misc
+
+.DS_Store
