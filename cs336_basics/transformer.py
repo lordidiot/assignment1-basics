@@ -198,6 +198,7 @@ class MultiheadSelfAttention(nn.Module):
     ):
         super().__init__()
         self.num_heads = num_heads
+        self.device = device
         self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
@@ -218,7 +219,7 @@ class MultiheadSelfAttention(nn.Module):
         q_BsDLE = rearrange(q_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
         k_BsDLE = rearrange(k_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
         v_BsDLE = rearrange(v_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
-        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=self.device))
         mixed_BsDLE = scaled_dot_product_attention(q_BsDLE, k_BsDLE, v_BsDLE, attention_mask_LL)
         mixed_BsLH = rearrange(mixed_BsDLE, "... D L E -> ... L (D E)")
         out_BsLH = self.o_proj(mixed_BsLH)
@@ -283,6 +284,7 @@ class TransformerBlock(nn.Module):
         dtype: torch.dtype | None = None
     ):
         super().__init__()
+        self.device = device
         self.attention = MultiheadSelfAttentionRoPE(d_model, num_heads, max_seq_len, theta, device=device, dtype=dtype)
         self.ff = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
         self.rmsnorm1 = RMSNorm(d_model, device=device, dtype=dtype)
@@ -295,7 +297,7 @@ class TransformerBlock(nn.Module):
         H: hidden_dim
         """
         seq_len = x_BsLH.shape[-2]
-        token_positions = torch.arange(seq_len)
+        token_positions = torch.arange(seq_len, device=self.device)
         x_BsLH = x_BsLH + self.attention(self.rmsnorm1(x_BsLH), token_positions)
         x_BsLH = x_BsLH + self.ff(self.rmsnorm2(x_BsLH))
         return x_BsLH
@@ -368,26 +370,27 @@ class AdamW(torch.optim.Optimizer):
 
     def step(self, closure: Optional[Callable] = None):
         loss = None if closure is None else closure()
-        for group in self.param_groups:
-            lr, weight_decay, betas, eps = group["lr"], group["weight_decay"], group["betas"], group["eps"]
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
+        with torch.no_grad():
+            for group in self.param_groups:
+                lr, weight_decay, betas, eps = group["lr"], group["weight_decay"], group["betas"], group["eps"]
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
 
-                state: dict[str, Any] = self.state[p]
-                t = state.get("t", 1)
-                m = state["m"] if "m" in state else torch.zeros_like(p)
-                v = state["v"] if "v" in state else torch.zeros_like(p)
-                lr_t = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
+                    state: dict[str, Any] = self.state[p]
+                    t = state.get("t", 1)
+                    m = state["m"] if "m" in state else torch.zeros_like(p)
+                    v = state["v"] if "v" in state else torch.zeros_like(p)
+                    lr_t = lr * math.sqrt(1 - betas[1] ** t) / (1 - betas[0] ** t)
 
-                p.data -= lr * weight_decay * p.data
-                m = betas[0] * m + (1 - betas[0]) * p.grad
-                v = betas[1] * v + (1 - betas[1]) * (p.grad ** 2)
-                p.data -= lr_t * m / (torch.sqrt(v) + eps)
+                    p.data -= lr * weight_decay * p.data
+                    m = betas[0] * m + (1 - betas[0]) * p.grad
+                    v = betas[1] * v + (1 - betas[1]) * (p.grad ** 2)
+                    p.data -= lr_t * m / (torch.sqrt(v) + eps)
 
-                state["t"] = t + 1
-                state["m"] = m
-                state["v"] = v
+                    state["t"] = t + 1
+                    state["m"] = m
+                    state["v"] = v
         return loss
 
 
@@ -400,14 +403,18 @@ def get_lr_cosine_schedule(t: float, a_max: float, a_min: float, t_w: int, t_c: 
         return a_min
 
 
-def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-6):
+def gradient_norm(parameters: list[nn.Parameter]):
     trainable = [p for p in parameters if p.grad is not None]
-
     square_sum = 0
     for p in trainable:
         square_sum += reduce(p.grad ** 2, "... -> ", "sum")
     norm = torch.sqrt(square_sum)
+    return norm
 
+
+def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-6):
+    trainable = [p for p in parameters if p.grad is not None]
+    norm = gradient_norm(trainable)
     if norm > m:
         for p in trainable:
             p.grad.mul_(m / (norm + eps))
@@ -433,12 +440,12 @@ def save_checkpoint(
         ctx_mgr = open(out, "wb")
     else:
         ctx_mgr = nullcontext(out)
-    
+
     with ctx_mgr as out_f:
         checkpoint = {
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "iteration": iteration 
+            "iteration": iteration
         }
         torch.save(checkpoint, out_f)
 
@@ -452,7 +459,7 @@ def load_checkpoint(
         ctx_mgr = open(src, "rb")
     else:
         ctx_mgr = nullcontext(src)
-    
+
     with ctx_mgr as src_f:
         checkpoint = torch.load(src_f)
         model.load_state_dict(checkpoint['model'])

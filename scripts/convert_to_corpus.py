@@ -35,5 +35,6 @@ with open(input_pkl, "rb") as input_f:
     with open(output_dir / "meta.json", "w") as meta_f:
         json.dump({
             "dtype": str(dtype),
-            "shape": [token_count]
+            "shape": [token_count],
+            "eos_token_id": eos_token_id,
         }, meta_f)
