@@ -261,7 +261,8 @@ SCRIPT_PATH="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"
 
 # watchman-make accepts a script path and invokes it when matching files
 # change. Export the current options so the invoked script performs a
-# one-shot sync using the same settings. :contentReference[oaicite:3]{index=3}rt ASSIGNMENT_SYNC_WATCH_CHILD=1
+# one-shot sync using the same settings.
+export ASSIGNMENT_SYNC_WATCH_CHILD=1
 export ASSIGNMENT_SYNC_TARGET="$TARGET"
 export ASSIGNMENT_SYNC_EXCLUDE_DATA="$EXCLUDE_DATA"
 export ASSIGNMENT_SYNC_USE_GITIGNORE="$USE_GITIGNORE"

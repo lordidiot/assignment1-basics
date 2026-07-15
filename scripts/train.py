@@ -128,7 +128,11 @@ def main(
                     "grad_norm": grad_norm.item(),
                     "clip_grad_norm": clip_grad_norm.item(),
                     "lr": lr_t,
+                    "gpu/mem_allocated_gb": torch.cuda.memory_allocated() / 1e9,
+                    "gpu/mem_reserved_gb":  torch.cuda.memory_reserved() / 1e9,
+                    "gpu/mem_peak_gb":      torch.cuda.max_memory_allocated() / 1e9,
                 }, step=step)
+                torch.cuda.reset_peak_memory_stats()
 
 
 if __name__ == '__main__':
