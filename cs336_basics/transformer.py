@@ -423,7 +423,8 @@ def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-
     norm = gradient_norm(trainable)
     scale = (m / (norm + eps)).clamp(max=1.0) # branchless clipping
     for p in trainable:
-        p.grad.mul_(m / (norm + eps))
+        p.grad.mul_(scale)
+    return norm
 
 
 def get_batch(x: np.ndarray, batch_size: int, context_length: int, device: str):

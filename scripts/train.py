@@ -206,12 +206,11 @@ def main(
                 group["lr"] = lr_t
             x, y = token_loader.get_batch()
             optimizer.zero_grad()
-            logits = model(x)
-            loss = cross_entropy_loss(logits, y)
+            with torch.autocast(config["device"], dtype=torch.bfloat16):
+                logits = model(x)
+                loss = cross_entropy_loss(logits, y)
             loss.backward()
-            grad_norm = gradient_norm(model.parameters())
-            gradient_clipping(model.parameters(), config["gradient_clip"])
-            clip_grad_norm = gradient_norm(model.parameters())
+            grad_norm = gradient_clipping(model.parameters(), config["gradient_clip"])
             optimizer.step()
 
             # Logging stuff
@@ -219,7 +218,6 @@ def main(
                 run.log({
                     "train_loss": loss.item(),
                     "grad_norm": grad_norm.item(),
-                    "clip_grad_norm": clip_grad_norm.item(),
                     "lr": lr_t,
                     "gpu/mem_allocated_gb": torch.cuda.memory_allocated() / 1e9,
                     "gpu/mem_reserved_gb":  torch.cuda.memory_reserved() / 1e9,
