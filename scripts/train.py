@@ -13,8 +13,10 @@ import wandb
 from cs336_basics.transformer import AdamW, TransformerLM, cross_entropy_loss, get_batch, get_lr_cosine_schedule, gradient_clipping, gradient_norm, save_checkpoint
 
 
+WARMUP = 5
+TIMING_WINDOW = 20
 LOG_INTERVAL = 25
-VAL_INTERVAL = 1000
+VAL_INTERVAL = 800
 CS336_DIR = Path(__file__).resolve().parent.parent
 
 class TokenLoader:
@@ -53,13 +55,13 @@ class Validation:
         self.device = device
 
     def get_loss(self, model: torch.nn.Module) -> float:
-        with torch.inference_mode():
+        with torch.inference_mode(), torch.autocast(device_type=self.device, dtype=torch.bfloat16):
             losses = []
             lens = []
 
             N = len(self.tokens)
             chunk_size = self.batch_size * self.context_length
-            for batch_start in tqdm(range(0, N, chunk_size)):
+            for batch_start in range(0, N, chunk_size):
                 chunk = self.tokens[batch_start:batch_start+chunk_size+1]
                 xs = []
                 ys = []
@@ -173,13 +175,24 @@ def main(
         run_dir = CS336_DIR / "out" / run.name
         run_dir.mkdir()
 
+        val_iter_s = None
         for step in tqdm(range(config["steps"])):
-            # cosine schedule
+            # Measurement code
+            if step == WARMUP:
+                torch.cuda.synchronize()
+                timing_start = time.perf_counter()
+            if step == WARMUP + TIMING_WINDOW:
+                torch.cuda.synchronize()
+                train_iter_s = (time.perf_counter() - timing_start) / TIMING_WINDOW
+                run.summary["timing/train_iter_s"] = train_iter_s
+                run.summary["timing/val_iter_s"] = val_iter_s
+                val_train_ratio = val_iter_s / (train_iter_s * VAL_INTERVAL + val_iter_s)
+                print(f"{train_iter_s=}, {val_iter_s=}, {val_train_ratio=}")
+
+            # Training step
             lr_t = get_lr_cosine_schedule(step, config["lr"], config["min_lr"], config["warmup_steps"], config["steps"])
             for group in optimizer.param_groups:
                 group["lr"] = lr_t
-
-            t = time.perf_counter()
             x, y = token_loader.get_batch()
             optimizer.zero_grad()
             logits = model(x)
@@ -189,9 +202,8 @@ def main(
             gradient_clipping(model.parameters(), config["gradient_clip"])
             clip_grad_norm = gradient_norm(model.parameters())
             optimizer.step()
-            train_iter_s = time.perf_counter() - t
 
-
+            # Logging stuff
             if step % LOG_INTERVAL == 0:
                 run.log({
                     "train_loss": loss.item(),
@@ -203,20 +215,17 @@ def main(
                     "gpu/mem_peak_gb":      torch.cuda.max_memory_allocated() / 1e9,
                 }, step=step)
                 torch.cuda.reset_peak_memory_stats()
-
             if step % VAL_INTERVAL == 0:
-                t = time.perf_counter()
+                if val_iter_s is None:
+                    torch.cuda.synchronize()
+                    t = time.perf_counter()
                 val_loss = validation.get_loss(model)
-                val_iter_s = time.perf_counter() - t
+                if val_iter_s is None:
+                    torch.cuda.synchronize()
+                    val_iter_s = time.perf_counter() - t
                 run.log({
                     "val_loss": val_loss,
                 }, step=step)
-
-            if step == 0:
-                run.summary["timing/train_iter_s"] = train_iter_s
-                run.summary["timing/val_iter_s"] = val_iter_s
-                val_train_ratio = val_iter_s / (train_iter_s * VAL_INTERVAL + val_iter_s)
-                print(f"{train_iter_s=}, {val_iter_s=}, {val_train_ratio=}")
 
         # Log one last time
         run.log({
