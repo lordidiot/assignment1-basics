@@ -185,6 +185,8 @@ def main(
     ) as run:
         run_dir = CS336_DIR / "out" / run.name
         run_dir.mkdir()
+        with open(run_dir / "config.json", "w") as f:
+            json.dump(config, f)
 
         val_iter_s = None
         for step in tqdm(range(config["steps"])):

@@ -168,3 +168,4 @@ cython_debug/
 /out/misc
 
 .DS_Store
+/wandb
