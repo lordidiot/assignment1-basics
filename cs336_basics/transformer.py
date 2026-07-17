@@ -219,7 +219,7 @@ class MultiheadSelfAttention(nn.Module):
         q_BsDLE = rearrange(q_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
         k_BsDLE = rearrange(k_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
         v_BsDLE = rearrange(v_BsLH, "... L (D E) -> ... D L E", D=self.num_heads)
-        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)).to(self.device)
+        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=self.device))
         mixed_BsDLE = scaled_dot_product_attention(q_BsDLE, k_BsDLE, v_BsDLE, attention_mask_LL)
         mixed_BsLH = rearrange(mixed_BsDLE, "... D L E -> ... L (D E)")
         out_BsLH = self.o_proj(mixed_BsLH)
@@ -244,6 +244,11 @@ class MultiheadSelfAttentionRoPE(nn.Module):
         self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.rope = RoPE(theta, d_model // num_heads, max_seq_len, device=device)
+        self.register_buffer(
+            "attention_mask_LL",
+            torch.tril(torch.ones(max_seq_len, max_seq_len, dtype=torch.bool, device=device)),
+            persistent=False
+        )
 
     def forward(self, x_BsLH: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
         """
@@ -266,7 +271,7 @@ class MultiheadSelfAttentionRoPE(nn.Module):
         q_BsDLE = self.rope(q_BsDLE, token_positions)
         k_BsDLE = self.rope(k_BsDLE, token_positions)
 
-        attention_mask_LL = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool)).to(self.device)
+        attention_mask_LL = self.attention_mask_LL[:seq_len, :seq_len]
         mixed_BsDLE = scaled_dot_product_attention(q_BsDLE, k_BsDLE, v_BsDLE, attention_mask_LL)
         mixed_BsLH = rearrange(mixed_BsDLE, "... D L E -> ... L (D E)")
         out_BsLH = self.o_proj(mixed_BsLH)
@@ -416,9 +421,9 @@ def gradient_norm(parameters: list[nn.Parameter]):
 def gradient_clipping(parameters: list[nn.Parameter], m: float, eps: float = 1e-6):
     trainable = [p for p in parameters if p.grad is not None]
     norm = gradient_norm(trainable)
-    if norm > m:
-        for p in trainable:
-            p.grad.mul_(m / (norm + eps))
+    scale = (m / (norm + eps)).clamp(max=1.0) # branchless clipping
+    for p in trainable:
+        p.grad.mul_(m / (norm + eps))
 
 
 def get_batch(x: np.ndarray, batch_size: int, context_length: int, device: str):
@@ -426,8 +431,8 @@ def get_batch(x: np.ndarray, batch_size: int, context_length: int, device: str):
         raise ValueError(f"Sequence too short ({len(x)=}) for {context_length=}")
     idxs = np.random.randint(0, len(x)-context_length, (batch_size,1))
     idxs = idxs + np.arange(context_length)
-    tensor_x = torch.tensor(x[idxs], device=device, dtype=torch.long)
-    tensor_y = torch.tensor(x[idxs+1], device=device, dtype=torch.long)
+    tensor_x = torch.from_numpy(x[idxs]).pin_memory().to(device, non_blocking=True).to(torch.long)
+    tensor_y = torch.from_numpy(x[idxs+1]).pin_memory().to(device, non_blocking=True).to(torch.long)
     return tensor_x, tensor_y
 
 

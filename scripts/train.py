@@ -3,18 +3,21 @@ import json
 from pathlib import Path
 import random
 import sys
+from threading import Thread
 import time
 
 import torch
 import numpy as np
+from torch.profiler import ProfilerActivity, profile, schedule
 from tqdm import tqdm
+from queue import Queue
 import wandb
 
 from cs336_basics.transformer import AdamW, TransformerLM, cross_entropy_loss, get_batch, get_lr_cosine_schedule, gradient_clipping, gradient_norm, save_checkpoint
 
 
-WARMUP = 5
-TIMING_WINDOW = 20
+WARMUP = 50
+TIMING_WINDOW = 25
 LOG_INTERVAL = 25
 VAL_INTERVAL = 800
 CS336_DIR = Path(__file__).resolve().parent.parent
@@ -33,10 +36,17 @@ class TokenLoader:
         self.batch_size = batch_size
         self.context_length = context_length
         self.device = device
+        self._batch_queue = Queue(3)
+        self._worker_thread = Thread(target=self._worker, daemon=True)
+        self._worker_thread.start()
+
+    def _worker(self):
+        while True:
+            x, y = get_batch(self.tokens, self.batch_size, self.context_length, self.device)
+            self._batch_queue.put((x, y))
 
     def get_batch(self) -> tuple[torch.Tensor, torch.Tensor]:
-        # returns (x, y)
-        return get_batch(self.tokens, self.batch_size, self.context_length, self.device)
+        return self._batch_queue.get()
 
 
 class Validation:
@@ -78,17 +88,18 @@ class Validation:
                 xs = torch.tensor(np.stack(xs, 0), dtype=torch.long, device=self.device)
                 ys = torch.tensor(np.stack(ys, 0), dtype=torch.long, device=self.device)
                 logits = model(xs)
-                losses.append(cross_entropy_loss(logits, ys).cpu().numpy())
+                losses.append(cross_entropy_loss(logits, ys))
                 lens.append(xs.shape[0] * xs.shape[1])
 
                 if leftover is not None and len(leftover) > 1:
                     x = torch.tensor(leftover[:-1], dtype=torch.long, device=self.device).unsqueeze(0)
                     y = torch.tensor(leftover[1:], dtype=torch.long, device=self.device).unsqueeze(0)
                     logits = model(x)
-                    losses.append(cross_entropy_loss(logits, y).cpu().numpy())
+                    losses.append(cross_entropy_loss(logits, y))
                     lens.append(x.shape[0] * x.shape[1])
 
-            val_loss = np.sum(np.stack(losses) * (np.array(lens) / np.sum(lens))).item()
+            losses = torch.stack(losses).cpu().numpy()
+            val_loss = np.sum(losses * (np.array(lens) / np.sum(lens))).item()
             return val_loss
 
 
