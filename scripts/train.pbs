@@ -1,0 +1,28 @@
+#!/bin/bash
+#PBS -N training
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+
+cd "$PBS_O_WORKDIR"
+
+LR="${LR:-3e-4}"
+BATCH="${BATCH:-128}"
+STEPS="${STEPS:-10000}"
+CONTEXT_LEN="${CONTEXT_LEN:-256}"
+LAYERS="${LAYERS:-4}"
+D_MODEL="${D_MODEL:-512}"
+N_HEADS="${N_HEADS:-16}"
+D_FF="${D_FF:-1344}"
+
+uv run scripts/train.py \
+	./data/TinyStoriesV2-GPT4-train-corpus \
+	./data/TinyStoriesV2-GPT4-valid-corpus \
+	--lr "$LR" \
+	--batch-size "$BATCH" \
+	--steps "$STEPS" \
+	--context-length "$CONTEXT_LEN" \
+	--num-layers "$LAYERS" \
+	--d-model "$D_MODEL" \
+	--num-heads "$N_HEADS" \
+	--d-ff "$D_FF"

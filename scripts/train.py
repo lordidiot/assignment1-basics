@@ -19,7 +19,8 @@ from cs336_basics.transformer import AdamW, TransformerLM, cross_entropy_loss, g
 WARMUP = 50
 TIMING_WINDOW = 25
 LOG_INTERVAL = 25
-VAL_INTERVAL = 800
+VAL_INTERVAL_TOKENS = 26214400 # 1 validation every VAL_INTERVAL_TOKENS (old: 800 steps)
+VAL_BATCH = 128
 CS336_DIR = Path(__file__).resolve().parent.parent
 
 class TokenLoader:
@@ -151,6 +152,7 @@ def main(
         "model_dtype": str(model_dtype),
         "device": "cuda" if torch.cuda.is_available() else "cpu",
     }
+    val_interval_steps = int(VAL_INTERVAL_TOKENS / config["context_length"] / config["batch_size"])
 
     model = TransformerLM(
         config["vocab_size"],
@@ -170,7 +172,7 @@ def main(
     )
     validation = Validation(
         val_path / "tokens.bin", np.uint16, tuple(val_meta["shape"]),
-        config["batch_size"], config["context_length"], config["device"]
+        VAL_BATCH, config["context_length"], config["device"]
     )
     optimizer = AdamW(
         model.parameters(),
@@ -199,7 +201,7 @@ def main(
                 train_iter_s = (time.perf_counter() - timing_start) / TIMING_WINDOW
                 run.summary["timing/train_iter_s"] = train_iter_s
                 run.summary["timing/val_iter_s"] = val_iter_s
-                val_train_ratio = val_iter_s / (train_iter_s * VAL_INTERVAL + val_iter_s)
+                val_train_ratio = val_iter_s / (train_iter_s * val_interval_steps + val_iter_s)
                 print(f"{train_iter_s=}, {val_iter_s=}, {val_train_ratio=}")
 
             # Training step
@@ -226,7 +228,7 @@ def main(
                     "gpu/mem_peak_gb":      torch.cuda.max_memory_allocated() / 1e9,
                 }, step=step)
                 torch.cuda.reset_peak_memory_stats()
-            if step % VAL_INTERVAL == 0:
+            if step % val_interval_steps == 0:
                 if val_iter_s is None:
                     torch.cuda.synchronize()
                     t = time.perf_counter()
