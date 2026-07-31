@@ -15,9 +15,17 @@ D_MODEL="${D_MODEL:-512}"
 N_HEADS="${N_HEADS:-16}"
 D_FF="${D_FF:-1344}"
 
+nvidia-smi
+
+# Copy files for speed
+SCRATCH="/tmp/${PBS_JOBID}"
+mkdir $SCRATCH
+cp -r ./data/TinyStoriesV2-GPT4-train-corpus $SCRATCH
+cp -r ./data/TinyStoriesV2-GPT4-valid-corpus $SCRATCH
+
 uv run scripts/train.py \
-	./data/TinyStoriesV2-GPT4-train-corpus \
-	./data/TinyStoriesV2-GPT4-valid-corpus \
+	"$SCRATCH/TinyStoriesV2-GPT4-train-corpus" \
+	"$SCRATCH/TinyStoriesV2-GPT4-valid-corpus" \
 	--lr "$LR" \
 	--batch-size "$BATCH" \
 	--steps "$STEPS" \

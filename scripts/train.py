@@ -33,7 +33,7 @@ class TokenLoader:
         context_length: int,
         device: str,
     ):
-        self.tokens = np.memmap(tokens_path, dtype=dtype, shape=shape)
+        self.tokens = np.memmap(tokens_path, dtype=dtype, shape=shape, mode="r")
         self.batch_size = batch_size
         self.context_length = context_length
         self.device = device
@@ -60,7 +60,7 @@ class Validation:
         context_length: int,
         device: str,
     ):
-        self.tokens = np.memmap(tokens_path, dtype=dtype, shape=shape)
+        self.tokens = np.memmap(tokens_path, dtype=dtype, shape=shape, mode="r")
         self.batch_size = batch_size
         self.context_length = context_length
         self.device = device
