@@ -349,10 +349,10 @@ def cross_entropy_loss(logits_BsV: torch.Tensor, targets_Bs: torch.Tensor) -> to
     E: vocab_size / number of embeddings
     """
     correct_Bs = logits_BsV.gather(-1, targets_Bs.unsqueeze(-1)).squeeze(-1)
-    max_logit_BsV = reduce(logits_BsV, "... V -> ... 1", "max")
-    exp_BsV = torch.exp(logits_BsV - max_logit_BsV)
+    max_logit_Bs1 = reduce(logits_BsV, "... V -> ... 1", "max")
+    exp_BsV = torch.exp(logits_BsV - max_logit_Bs1)
     sum_logit_Bs = reduce(exp_BsV, "... V -> ...", "sum")
-    out_Bs = - correct_Bs + max_logit_BsV.unsqueeze(-1) + torch.log(sum_logit_Bs)
+    out_Bs = - correct_Bs + max_logit_Bs1.squeeze(-1) + torch.log(sum_logit_Bs)
     out_ = reduce(out_Bs, "... -> ", "mean")
     return out_
 
