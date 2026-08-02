@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SOURCE_DIR="/Users/idiot/Projects/assignment1-basics"
-NSCC_DEST="nscc:/home/users/nus/e0959961/assignment1-basics/"
+NSCC_DEST="nscc:/home/users/nus/e1115691/idiot/assignment1-basics/"
 CS336_DEST="cs336:/root/assignment1-basics/"
 
 # Option 1: Replace the placeholder with your NSCC password.
